@@ -88,6 +88,10 @@ function handle(ws, msg){
     room.players[ws.id] = { ...ws.state, id: ws.id };
     send(ws, { t:'joined', id: ws.id, code: msg.code, settings: room.settings, hostId: room.hostId, players: room.players });
     broadcast(room, { t:'playerJoin', id: ws.id, player: room.players[ws.id] }, ws.id);
+    // ── KEY FIX: if the match is already running, drop the guest straight in.
+    if(room.started){
+      send(ws, { t:'started', settings: room.settings });
+    }
   }
   else if(msg.t === 'start'){
     if(!ws.room || !rooms.has(ws.room)) return;
