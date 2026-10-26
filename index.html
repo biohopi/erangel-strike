@@ -984,6 +984,7 @@ function drawMinimap(){
 const net = {
   connected: false, ws: null, id: null, isHost: false, room: null,
   remotePlayers: new Map(), sendTimer: 0, name: 'player',
+  hasHostData: false,     // set true on first hostBots packet (guests only)
 };
 function sendNet(obj){ if(net.ws && net.ws.readyState === 1) net.ws.send(JSON.stringify(obj)); }
 function connectAndCreate(){
@@ -1036,16 +1037,28 @@ function handleNetMessage(ev){
       if(msg.players) syncPlayers(Object.values(msg.players));
       break;
     case 'started':
-      if(msg.settings){
-        if(msg.settings.blueBots != null) settings.blueBots = msg.settings.blueBots;
-        if(msg.settings.redBots != null) settings.redBots = msg.settings.redBots;
-        if(msg.settings.bluePlayers != null) settings.bluePlayers = msg.settings.bluePlayers;
-        if(msg.settings.redPlayers != null) settings.redPlayers = msg.settings.redPlayers;
-      }
-      startGame();
-      break;
+  if(msg.settings){
+    if(msg.settings.blueBots != null) settings.blueBots = msg.settings.blueBots;
+    if(msg.settings.redBots != null) settings.redBots = msg.settings.redBots;
+    if(msg.settings.bluePlayers != null) settings.bluePlayers = msg.settings.bluePlayers;
+    if(msg.settings.redPlayers != null) settings.redPlayers = msg.settings.redPlayers;
+  }
+  elLobbyMsg.textContent = 'ENTERING MATCH…';
+  setTimeout(()=>startGame(), 250);
+  break;
     case 'players': syncPlayers(msg.d); break;
-    case 'hostBots': if(!net.isHost) syncHostState(msg.d); break;
+case 'playerJoin':
+  // host sees a new guest — shove bots at them right now (works even while paused)
+  if(net.isHost && net.connected){
+    sendNet({ t:'hostBots', d: buildHostBotsPayload() });
+  }
+  break;
+    case 'hostBots':
+  if(!net.isHost){
+    net.hasHostData = true;
+    syncHostState(msg.d);
+  }
+  break;
     case 'hitBot':
       if(net.isHost){
         const b = bots.find(x=>x.id === msg.d.botId);
@@ -1124,6 +1137,12 @@ function syncHostState(d){
   }
   updateAliveCount();
 }
+function buildHostBotsPayload(){
+  return {
+    bots: bots.map(b=>({id:b.id, x:b.pos.x, y:b.pos.y, z:b.pos.z, hp:b.hp, alive:b.alive, yaw:b.obj.rotation.y, team:b.team, name:b.name})),
+    zone: {cx:zoneState.cx, cz:zoneState.cz, r:zoneState.r, nextCx:zoneState.nextCx, nextCz:zoneState.nextCz, nextR:zoneState.nextR, phase:zoneState.phase, shrinking:zoneState.shrinking, t:zoneState.t}
+  };
+}
 function netTick(dt){
   if(!net.connected) return;
   net.sendTimer += dt;
@@ -1136,10 +1155,7 @@ function netTick(dt){
       weapon: player.slots[player.slot].id, kills: player.kills,
     }});
     if(net.isHost){
-      sendNet({ t:'hostBots', d:{
-        bots: bots.map(b=>({id:b.id, x:b.pos.x, y:b.pos.y, z:b.pos.z, hp:b.hp, alive:b.alive, yaw:b.obj.rotation.y, team:b.team, name:b.name})),
-        zone: {cx:zoneState.cx, cz:zoneState.cz, r:zoneState.r, nextCx:zoneState.nextCx, nextCz:zoneState.nextCz, nextR:zoneState.nextR, phase:zoneState.phase, shrinking:zoneState.shrinking, t:zoneState.t}
-      }});
+      sendNet({ t:'hostBots', d: buildHostBotsPayload() });
     }
   }
 }
@@ -1284,7 +1300,8 @@ $('stopBtn').addEventListener('click', ()=>{ stopGame(); });
 function stopGame(){
   if(net.ws){ try{ net.ws.close(); }catch(e){} net.ws = null; }
   net.connected = false; net.isHost = false; net.room = null; net.id = null;
-  net.remotePlayers.clear();
+net.hasHostData = false;
+net.remotePlayers.clear();
   for(const [id, m] of remoteMeshes) remoteGroup.remove(m.group);
   remoteMeshes.clear();
   clearBots();
@@ -1458,19 +1475,21 @@ function autoPickup(){
 const plane = { x:-HALF*0.95, y:170, z:rand(-40,40), speed:52, dir:1 };
 let gameTime = 0, vmKick = 0, chuteMesh = null;
 
-function populateWorld(){
+function populateWorld(skipBots){
   clearBots();
-  for(let i=0;i<settings.blueBots;i++){
-    let x,z,t=0;
-    do{ x=rand(-HALF*0.85,HALF*0.85); z=rand(-HALF*0.85,HALF*0.85); t++; }
-    while(dist2(x,z,0,0)<100*100 && t<50);
-    spawnBot(x,z,0);
-  }
-  for(let i=0;i<settings.redBots;i++){
-    let x,z,t=0;
-    do{ x=rand(-HALF*0.85,HALF*0.85); z=rand(-HALF*0.85,HALF*0.85); t++; }
-    while(dist2(x,z,0,0)<100*100 && t<50);
-    spawnBot(x,z,1);
+  if(!skipBots){
+    for(let i=0;i<settings.blueBots;i++){
+      let x,z,t=0;
+      do{ x=rand(-HALF*0.85,HALF*0.85); z=rand(-HALF*0.85,HALF*0.85); t++; }
+      while(dist2(x,z,0,0)<100*100 && t<50);
+      spawnBot(x,z,0);
+    }
+    for(let i=0;i<settings.redBots;i++){
+      let x,z,t=0;
+      do{ x=rand(-HALF*0.85,HALF*0.85); z=rand(-HALF*0.85,HALF*0.85); t++; }
+      while(dist2(x,z,0,0)<100*100 && t<50);
+      spawnBot(x,z,1);
+    }
   }
 
   // MORE loot — buildings 4-8, weapon 40% ammo 30% med 30%
@@ -1505,7 +1524,8 @@ function startGame(){
   player.hp=100; player.alive=true;
   phase='plane';
   refreshTeamBadge();
-  populateWorld();
+  // Guests don't spawn bots — host is authoritative. Loot is still local per client.
+  populateWorld(net.connected && !net.isHost);
   showMsg('DROP IN', 'SPACE / JMP TO JUMP', 3000);
   refreshHealthUI(); refreshWeaponUI();
 }
@@ -1535,6 +1555,8 @@ function playerDie(){
 }
 function checkWin(){
   if(!player.alive || phase!=='ground') return;
+  // guests wait for at least one hostBots packet before declaring victory
+  if(net.connected && !net.isHost && !net.hasHostData) return;
   const enemyBots = bots.filter(b=>b.alive && b.team !== player.team).length;
   const enemyPlayers = [...net.remotePlayers.values()].filter(p=>p.alive && p.team !== player.team).length;
   if(enemyBots === 0 && enemyPlayers === 0){
