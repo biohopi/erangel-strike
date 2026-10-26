@@ -1,129 +1,163 @@
-#!/usr/bin/env node
-/**
- * ============================================================================
- * ERANGEL STRIKE — Socket.io dev server
- *
- * Serves the game over HTTP and provides real-time multiplayer rooms.
- *
- * USAGE
- *   npm install            (installs express + socket.io + three for bundling)
- *   node server.js
- *   -> open the printed URL (default http://localhost:3000)
- *
- * Then open the same URL in 2+ browser tabs and set mode = "Online (Socket.io)"
- * to play together. AI bots still fill empty slots for each connected player.
- * ============================================================================
- */
 const http = require('http');
-const path = require('path');
 const fs = require('fs');
-const express = require('express');
-const { Server } = require('socket.io');
+const path = require('path');
+const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 3000;
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { maxHttpBufferSize: 1e6, pingInterval: 1000, pingTimeout: 4000 });
+const rooms = new Map();
 
-const ROOT = __dirname;
-
-// Serve the (socket.io-injected) game page first, then static files.
-app.get('/', (req, res) => {
-  let html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
-  const tag = '<script src="/socket.io/socket.io.js"></script>\n';
-  html = html.replace('<noscript>', tag + '<noscript>');
-  return res.send(html);
-});
-app.use(express.static(ROOT));
-// Serve a local copy of Three.js so offline/Intranet clients never depend on the CDN.
-app.get('/three.min.js', (req, res) => {
-  const p = path.join(ROOT, 'node_modules', 'three', 'build', 'three.min.js');
-  res.sendFile(p, (err) => { if (err) res.status(404).end(); });
-});
-
-// ---------------------------------------------------------------------------
-// Game rooms. Simplest robust model for a prototype:
-//   - One room per "team size + accent" is created on demand (named "room-<n>").
-//   - When a client joins, they get the room roster and a spawned server entity.
-//   - Clients send their own move/aim/shoot intents; the server relays them to
-//     the other clients in the room. Each client runs the simulation with
-//     remote players interpolated. This is "client-authoritative sync" for a
-//     prototype — acceptable for LAN/demo, documented in the roadmap.
-// ---------------------------------------------------------------------------
-const rooms = new Map(); // roomId -> { clients:Set }
-
-function joinRoom(socket, roomId) {
-  let room = rooms.get(roomId);
-  if (!room) { room = { clients: new Set() }; rooms.set(roomId, room); }
-  room.clients.add(socket);
-  socket.data.roomId = roomId;
-  socket.join('room:' + roomId);
-  // tell the newcomer who is here
-  const roster = [...room.clients].filter(c => c !== socket).map(c => ({
-    id: c.data.uid, name: c.data.name, team: c.data.team
-  }));
-  socket.emit('room:enter', { roomId, roster });
-  // tell existing clients a new peer joined
-  socket.to('room:' + roomId).emit('player:join', { id: socket.data.uid, name: socket.data.name, team: socket.data.team });
-  console.log(`[${roomId}] + ${socket.data.name} (total ${room.clients.size})`);
-}
-
-function leaveRoom(socket) {
-  const roomId = socket.data.roomId;
-  if (!roomId) return;
-  socket.to('room:' + roomId).emit('player:leave', { id: socket.data.uid });
-  const room = rooms.get(roomId);
-  if (room) {
-    room.clients.delete(socket);
-    if (room.clients.size === 0) rooms.delete(roomId);
+const server = http.createServer((req, res) => {
+  if(req.url === '/' || req.url === '/index.html'){
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(fs.readFileSync(path.join(__dirname, 'index.html')));
+  } else if(req.url === '/health'){
+    res.setHeader('Content-Type', 'text/plain');
+    res.end('ok');
+  } else {
+    res.statusCode = 404;
+    res.end('not found');
   }
-  socket.leave('room:' + roomId);
-}
-
-io.on('connection', (socket) => {
-  // Client sends { name, team, teamSize, roomName? } as handshake.
-  socket.data.uid = 'p_' + Math.random().toString(36).slice(2, 10);
-  socket.data.name = 'Player';
-
-  socket.on('join', (opts = {}) => {
-    socket.data.name = (opts.name || 'Player').slice(0, 12);
-    socket.data.team = (opts.team === 0 || opts.team === 1) ? opts.team : (Math.random() < 0.5 ? 0 : 1);
-    const roomId = 'room_' + (opts.roomId ? String(opts.roomId) : 'default');
-    joinRoom(socket, roomId);
-  });
-
-  // Relay control state at ~20-30 Hz from each client to the room.
-  socket.on('state', (data) => {
-    if (!socket.data.roomId) return;
-    // tag with author
-    socket.to('room:' + socket.data.roomId).emit('remote:state', {
-      id: socket.data.uid, ...data
-    });
-  });
-
-  // Fire events (optional; state already carries aim but triggers are nice for fx).
-  socket.on('shoot', (data) => {
-    if (!socket.data.roomId) return;
-    socket.to('room:' + socket.data.roomId).emit('remote:shoot', { id: socket.data.uid, ...data });
-  });
-
-  socket.on('name', (n) => { socket.data.name = String(n).slice(0, 12); });
-
-  socket.on('disconnect', () => leaveRoom(socket));
 });
 
-server.listen(PORT, () => {
-  const addrs = [];
-  const os = require('os');
-  const nets = os.networkInterfaces();
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name]) {
-      if (net.family === 'IPv4' && !net.internal) addrs.push(net.address);
+const wss = new WebSocketServer({ server, path: '/ws' });
+
+function genCode(){ return Math.random().toString(36).slice(2,8).toUpperCase(); }
+function send(ws, msg){ if(ws.readyState === 1) ws.send(JSON.stringify(msg)); }
+function broadcast(room, msg, exceptId){
+  const s = JSON.stringify(msg);
+  for(const c of wss.clients){
+    if(c.room === room.code && c.id !== exceptId && c.readyState === 1) c.send(s);
+  }
+}
+
+wss.on('connection', (ws) => {
+  ws.id = Math.random().toString(36).slice(2,10);
+  ws.room = null;
+  ws.state = { x:0, y:0, z:0, yaw:0, pitch:0, hp:100, weapon:null, alive:true, team:0, kills:0, name:'player' };
+
+  ws.on('message', (raw) => {
+    let msg; try{ msg = JSON.parse(raw); }catch(e){ return; }
+    handle(ws, msg);
+  });
+
+  ws.on('close', () => {
+    if(ws.room && rooms.has(ws.room)){
+      const room = rooms.get(ws.room);
+      delete room.players[ws.id];
+      broadcast(room, { t:'playerLeave', id: ws.id });
+      const remaining = Object.keys(room.players);
+      if(remaining.length === 0){ rooms.delete(ws.room); }
+      else if(room.hostId === ws.id){
+        room.hostId = remaining[0];
+        broadcast(room, { t:'hostChange', id: room.hostId });
+      }
+    }
+  });
+});
+
+function handle(ws, msg){
+  if(msg.t === 'create'){
+    const code = genCode();
+    ws.room = code;
+    ws.state.name = msg.name || 'HOST';
+    ws.state.team = msg.team || 0;
+    const room = {
+      code,
+      hostId: ws.id,
+      settings: msg.settings || { botsPerTeam: 15, perTeam: 4 },
+      players: {},
+      started: false,
+    };
+    room.players[ws.id] = { ...ws.state, id: ws.id };
+    rooms.set(code, room);
+    send(ws, { t:'created', id: ws.id, code, settings: room.settings, hostId: room.hostId });
+  }
+  else if(msg.t === 'join'){
+    const room = rooms.get(msg.code);
+    if(!room){ send(ws, { t:'error', message:'room not found' }); return; }
+    // count team sizes
+    let teamCount = [0,0];
+    for(const pid in room.players) teamCount[room.players[pid].team]++;
+    const chosenTeam = msg.team || 0;
+    if(teamCount[chosenTeam] >= room.settings.perTeam){
+      send(ws, { t:'error', message:'your team is full, pick the other' }); return;
+    }
+    ws.room = msg.code;
+    ws.state.name = msg.name || 'PLAYER';
+    ws.state.team = chosenTeam;
+    room.players[ws.id] = { ...ws.state, id: ws.id };
+    send(ws, {
+      t:'joined', id: ws.id, code: msg.code, settings: room.settings,
+      hostId: room.hostId, players: room.players
+    });
+    broadcast(room, { t:'playerJoin', id: ws.id, player: room.players[ws.id] }, ws.id);
+  }
+  else if(msg.t === 'start'){
+    if(!ws.room || !rooms.has(ws.room)) return;
+    const room = rooms.get(ws.room);
+    if(room.hostId !== ws.id) return;
+    room.started = true;
+    broadcast(room, { t:'started', settings: room.settings });
+  }
+  else if(msg.t === 'state'){
+    if(!ws.room || !rooms.has(ws.room)) return;
+    const room = rooms.get(ws.room);
+    if(!room.players[ws.id]) return;
+    if(msg.d) Object.assign(room.players[ws.id], msg.d);
+    if(msg.d) Object.assign(ws.state, msg.d);
+  }
+  else if(msg.t === 'hostBots'){
+    if(!ws.room || !rooms.has(ws.room)) return;
+    const room = rooms.get(ws.room);
+    if(room.hostId !== ws.id) return;
+    broadcast(room, { t:'hostBots', d: msg.d }, ws.id);
+  }
+  else if(msg.t === 'hitBot'){
+    if(!ws.room || !rooms.has(ws.room)) return;
+    const room = rooms.get(ws.room);
+    if(room.hostId === ws.id) return; // host handles own
+    const host = findWs(room, room.hostId);
+    if(host) send(host, { t:'hitBot', d: msg.d });
+  }
+  else if(msg.t === 'damage'){
+    if(!ws.room || !rooms.has(ws.room)) return;
+    const room = rooms.get(ws.room);
+    const target = room.players[msg.to];
+    if(!target) return;
+    const dmg = Math.max(0, Math.min(500, msg.dmg || 0));
+    target.hp = Math.max(0, target.hp - dmg);
+    if(target.hp <= 0) target.alive = false;
+    const targetWs = findWs(room, msg.to);
+    if(targetWs) send(targetWs, { t:'damage', dmg, head: !!msg.head, from: ws.id });
+  }
+  else if(msg.t === 'shoot'){
+    if(!ws.room || !rooms.has(ws.room)) return;
+    const room = rooms.get(ws.room);
+    broadcast(room, { t:'shoot', from: ws.id, d: msg.d }, ws.id);
+  }
+}
+
+function findWs(room, id){
+  for(const c of wss.clients){
+    if(c.id === id && c.room === room.code) return c;
+  }
+  return null;
+}
+
+// player state broadcast at 10Hz
+setInterval(() => {
+  for(const room of rooms.values()){
+    if(!room.started) continue;
+    const states = Object.values(room.players).map(p => ({
+      id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
+      hp: p.hp, alive: p.alive, team: p.team, weapon: p.weapon, kills: p.kills, name: p.name
+    }));
+    const payload = { t:'players', d: states };
+    const s = JSON.stringify(payload);
+    for(const c of wss.clients){
+      if(c.room === room.code && c.readyState === 1) c.send(s);
     }
   }
-  console.log('\n  ERANGEL STRIKE dev server running');
-  console.log('  --------------------------------');
-  console.log('  Local:     http://localhost:' + PORT);
-  addrs.forEach(a => console.log('  Network:   http://' + a + ':' + PORT));
-  console.log('  Open the same URL in 2+ tabs and choose "Online (Socket.io)".\n');
-});
+}, 100);
+
+server.listen(PORT, () => console.log('DROPZONE live on :' + PORT));

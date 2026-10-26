@@ -1,19 +1,14 @@
 {
-  "name": "erangel-strike",
-  "version": "0.9.0",
-  "description": "High-fidelity multiplayer 3D shooter prototype (Team Deathmatch) built with Three.js — single-file client + optional Socket.io server.",
+  "name": "dropzone",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Team battle royale — single HTML client + Node WebSocket relay",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "serve": "node server.js"
+    "start": "node server.js"
   },
-  "keywords": ["threejs", "fps", "multiplayer", "socket.io", "shooter"],
-  "author": "ERANGEL STRIKE prototype",
-  "license": "MIT",
+  "engines": { "node": ">=18" },
   "dependencies": {
-    "express": "^4.19.2",
-    "socket.io": "^4.7.5",
-    "three": "^0.160.0"
-  },
-  "devDependencies": {}
+    "ws": "^8.18.0"
+  }
 }
