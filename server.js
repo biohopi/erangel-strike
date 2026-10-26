@@ -64,7 +64,7 @@ function handle(ws, msg){
     const room = {
       code,
       hostId: ws.id,
-      settings: msg.settings || { botsPerTeam: 15, perTeam: 4 },
+      settings: msg.settings || { blueBots:10, redBots:10, bluePlayers:4, redPlayers:4 },
       players: {},
       started: false,
     };
@@ -75,21 +75,18 @@ function handle(ws, msg){
   else if(msg.t === 'join'){
     const room = rooms.get(msg.code);
     if(!room){ send(ws, { t:'error', message:'room not found' }); return; }
-    // count team sizes
+    const chosenTeam = msg.team || 0;
     let teamCount = [0,0];
     for(const pid in room.players) teamCount[room.players[pid].team]++;
-    const chosenTeam = msg.team || 0;
-    if(teamCount[chosenTeam] >= room.settings.perTeam){
-      send(ws, { t:'error', message:'your team is full, pick the other' }); return;
+    const maxPlayers = chosenTeam === 0 ? room.settings.bluePlayers : room.settings.redPlayers;
+    if(teamCount[chosenTeam] >= maxPlayers){
+      send(ws, { t:'error', message:'that team is full — pick the other' }); return;
     }
     ws.room = msg.code;
     ws.state.name = msg.name || 'PLAYER';
     ws.state.team = chosenTeam;
     room.players[ws.id] = { ...ws.state, id: ws.id };
-    send(ws, {
-      t:'joined', id: ws.id, code: msg.code, settings: room.settings,
-      hostId: room.hostId, players: room.players
-    });
+    send(ws, { t:'joined', id: ws.id, code: msg.code, settings: room.settings, hostId: room.hostId, players: room.players });
     broadcast(room, { t:'playerJoin', id: ws.id, player: room.players[ws.id] }, ws.id);
   }
   else if(msg.t === 'start'){
@@ -103,8 +100,7 @@ function handle(ws, msg){
     if(!ws.room || !rooms.has(ws.room)) return;
     const room = rooms.get(ws.room);
     if(!room.players[ws.id]) return;
-    if(msg.d) Object.assign(room.players[ws.id], msg.d);
-    if(msg.d) Object.assign(ws.state, msg.d);
+    if(msg.d){ Object.assign(room.players[ws.id], msg.d); Object.assign(ws.state, msg.d); }
   }
   else if(msg.t === 'hostBots'){
     if(!ws.room || !rooms.has(ws.room)) return;
@@ -115,7 +111,7 @@ function handle(ws, msg){
   else if(msg.t === 'hitBot'){
     if(!ws.room || !rooms.has(ws.room)) return;
     const room = rooms.get(ws.room);
-    if(room.hostId === ws.id) return; // host handles own
+    if(room.hostId === ws.id) return;
     const host = findWs(room, room.hostId);
     if(host) send(host, { t:'hitBot', d: msg.d });
   }
@@ -138,13 +134,10 @@ function handle(ws, msg){
 }
 
 function findWs(room, id){
-  for(const c of wss.clients){
-    if(c.id === id && c.room === room.code) return c;
-  }
+  for(const c of wss.clients){ if(c.id === id && c.room === room.code) return c; }
   return null;
 }
 
-// player state broadcast at 10Hz
 setInterval(() => {
   for(const room of rooms.values()){
     if(!room.started) continue;
@@ -152,8 +145,7 @@ setInterval(() => {
       id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
       hp: p.hp, alive: p.alive, team: p.team, weapon: p.weapon, kills: p.kills, name: p.name
     }));
-    const payload = { t:'players', d: states };
-    const s = JSON.stringify(payload);
+    const s = JSON.stringify({ t:'players', d: states });
     for(const c of wss.clients){
       if(c.room === room.code && c.readyState === 1) c.send(s);
     }
